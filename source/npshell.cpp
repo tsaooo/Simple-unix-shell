@@ -1,54 +1,27 @@
 #include <iostream>
-
+#include <unistd.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <errno.h>
+using namespace std;
 
 #define MAXCOMLENG 256
 #define MAXINLENG 15000
 #define PIPE 1
 #define NUMPIPE 2
 #define SINGLE 3
-
-using namespace std;
+#define WRITE 1
+#define READ 0
 
 typedef struct token_list{
     string tok[100];
     int length;
 }token_list;
+
 const string builtin_list[3] = {"setenv", "printenv", "exit"};
+int p1_fd[2], p2_fd[2];
 
-void handle_builtin(string);
-int parse_pipe(string, token_list **, int *);
-void tokenizer(string , char, token_list *);
-
-int main(int argc, char* const argv[]){
-    setenv("PATH", "bin:.", 1);
-    string input_string;
-    token_list *commands, params;
-    const char prompt[] = "$ ";
-    int mode, command_count;
-
-   
-    while(true){
-        int *num_com;
-        printf("%s", prompt);
-        getline(cin, input_string);
-        handle_builtin(input_string);
-        mode = parse_pipe(input_string, &commands, &command_count);
-        
-        switch (mode)
-        {
-        case PIPE :
-            break;  
-        case NUMPIPE :
-            break;
-        case SINGLE :
-
-            break;
-        default:
-            break;
-        }
-    }
-}
 void tokenizer(string s, char delim, token_list *l){
     size_t pos = 0;
     int n = 0;
@@ -65,6 +38,7 @@ void tokenizer(string s, char delim, token_list *l){
     }
     l->length = n;
 }
+
 void handle_builtin(string input){
     int i=0;
     token_list params;
@@ -89,15 +63,15 @@ void handle_builtin(string input){
 
 int parse_pipe(string input, token_list **commands, int *count){      
     size_t pos;
-    token_list tmp_coms;
+    token_list untok_comds;
     int n;
     bool flag_npipe = true;
     
-    tokenizer(input, '|', &tmp_coms);
-    n = tmp_coms.length;
+    tokenizer(input, '|', &untok_comds);
+    n = untok_comds.length;
     if(n > 1){
-        for (int i=0; i<tmp_coms.tok[n].length(); i++)
-            if(!isdigit(tmp_coms.tok[n][i])){
+        for (int i=0; i<untok_comds.tok[n].length(); i++)
+            if(!isdigit(untok_comds.tok[n][i])){
                 flag_npipe = false;
                 break;
             }
@@ -106,17 +80,81 @@ int parse_pipe(string input, token_list **commands, int *count){
         *count = n;
         *commands = new token_list[n];
         for(int i=0; i<n; i++)
-            tokenizer(tmp_coms.tok[i], ' ', &(*commands)[i]);
+            tokenizer(untok_comds.tok[i], ' ', &(*commands)[i]);
         if(flag_npipe) 
             return NUMPIPE;
         else 
             return PIPE;
     }
     else
+        *commands = new token_list[n];
+        tokenizer(untok_comds.tok[0], ' ', &(*commands)[0]);
         return SINGLE;
 }
-void parse_command(token_list com){
-    
+
+void redirect(int oldfd, int newfd){
+    if(oldfd != newfd){
+        dup2(newfd, oldfd);
+        close(newfd);   
+    }
 }
 
+void execute(token_list c, int in, int out, int err){
+    char *const *argv;
+    argv = new char*[c.length];         //waste efficiency, modify data structure later
+    for(int i=0;i<c.length;i++)
+        *argv[i] = *c.tok[i].c_str();
+
+    redirect(STDIN_FILENO, in);
+    redirect(STDOUT_FILENO, out);
+    redirect(STDERR_FILENO, err);
+    execvp(argv[0], argv);
+    exit(errno);
+}
+
+int main(int argc, char* const argv[]){
+    setenv("PATH", "bin:.", 1);
+    string input_string;
+    token_list *commands, params;
+    pid_t pid1, pid2;
+    const char prompt[] = "$ ";
+    int mode, count, in = STDIN_FILENO;
+    int *front_pipe = p1_fd, *end_pipe = p2_fd;
+   
+    while(true){
+        printf("%s", prompt);
+        getline(cin, input_string);
+        handle_builtin(input_string);
+        mode = parse_pipe(input_string, &commands, &count);
+        pipe(p1_fd);
+        pipe(p2_fd);
+
+        if((pid1 = fork()) == 0){
+            close(front_pipe[READ]);
+            close(end_pipe[READ]);
+            close(end_pipe[WRITE]);
+            execute(commands[0], in, front_pipe[WRITE], STDERR_FILENO);
+        }
+        for(int i = 1;i < count-1; i++){
+            int STATUS;
+            //Pid1 --pipe1--> Pid2 --pipe2-->
+            if((pid2 = fork()) == 0){
+                close(front_pipe[WRITE]);
+                close(end_pipe[READ]);
+                execute(commands[i], front_pipe[READ], end_pipe[WRITE], STDERR_FILENO);
+                //exec fail
+
+            }
+            close(front_pipe[READ]);
+            close(front_pipe[WRITE]);
+            close(end_pipe[READ]);
+            close(end_pipe[WRITE]);
+            waitpid(pid1, &STATUS, 0);
+            swap(front_pipe, end_pipe);
+            swap(pid1, pid2);
+            pipe(end_pipe);
+        }
+        //last command, need check numpipe,errpipe
+    }
+}
 
