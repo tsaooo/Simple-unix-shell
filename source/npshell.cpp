@@ -208,8 +208,8 @@ inline void redirect(int newfd, int oldfd){
     }
 }
 
-void run(token_list cmd, int in, int out, int err){
-    redirect(in, STDIN_FILENO);
+void run(token_list cmd, int fd_in, int out, int err){
+    redirect(fd_in, STDIN_FILENO);
     if(out != err){
         redirect(out, STDOUT_FILENO);
         redirect(err, STDERR_FILENO);
@@ -232,7 +232,7 @@ void run(token_list cmd, int in, int out, int err){
     }
 }
 
-void last_cmdcntl(bool fst, pid_t lpid, int in = STDIN_FILENO){
+void last_cmdcntl(bool fst, pid_t lpid, int fd_in = STDIN_FILENO){
     int n, index, inpipe_WRITE, out = STDOUT_FILENO, err = STDERR_FILENO, fd[2];
     int *last = fd, wait_count;
     pid_t cur_pid;
@@ -241,7 +241,7 @@ void last_cmdcntl(bool fst, pid_t lpid, int in = STDIN_FILENO){
     if(fst)
         if((index = search_plist(0)) != -1){
             wait_count = p_list.at(index).ch_count;
-            in = p_list.at(index).fd[READ];
+            fd_in = p_list.at(index).fd[READ];
             close(p_list.at(index).fd[WRITE]);
             p_list.erase(p_list.begin()+index);
             receive = true;
@@ -272,11 +272,11 @@ void last_cmdcntl(bool fst, pid_t lpid, int in = STDIN_FILENO){
             out = last[WRITE];
             if(mode == ERRPIPE) err = out;
         }
-        run(cmds[count-1], in, out, err);
+        run(cmds[count-1], fd_in, out, err);
     }
     else{
         int p;
-        if(in != STDIN_FILENO) close(in);
+        if(fd_in != STDIN_FILENO) close(fd_in);
         //if(mode == ERRPIPE || mode == NUMPIPE) close(last[WRITE]);  
         if(!fst) waitpid(lpid, NULL, 0);
         else if(receive){
@@ -294,25 +294,25 @@ void last_cmdcntl(bool fst, pid_t lpid, int in = STDIN_FILENO){
 void pipe_control(){
     pid_t pid1, pid2;
     int *front_pipe = p1_fd, *end_pipe = p2_fd;
-    int in = STDIN_FILENO, inpipe_WRITE, index, i, n, wait_count;
+    int fd_in = STDIN_FILENO, inpipe_WRITE, index, i, n, wait_count;
     bool PIPEIN = false, ign = false;
     pipe(front_pipe);
     
     if((index = search_plist(0)) != -1){
-        in = p_list.at(index).fd[READ];
+        fd_in = p_list.at(index).fd[READ];
         wait_count = p_list.at(index).ch_count;
         close(p_list.at(index).fd[WRITE]);
         p_list.erase(p_list.begin()+index);
     }
     if((pid1 = fork()) == 0){
         close(front_pipe[READ]);
-        run(cmds[0], in, front_pipe[WRITE], STDERR_FILENO);
+        run(cmds[0], fd_in, front_pipe[WRITE], STDERR_FILENO);
     }
     //parent wait all previous round hang childs
     else{
         close(front_pipe[WRITE]);
-        if(in != STDIN_FILENO){
-            close(in);
+        if(fd_in != STDIN_FILENO){
+            close(fd_in);
             //close(inpipe_WRITE);
             for (int i = 0; i < wait_count;){
                 int p;
@@ -339,7 +339,7 @@ void pipe_control(){
         }
     }
     //if need to pipe stdout or stderr to next "n" line
-    last_cmdcntl(false, front_pipe[READ], pid1);
+    last_cmdcntl(false, pid1, front_pipe[READ]);
 }
 
 void init(){
