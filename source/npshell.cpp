@@ -31,29 +31,29 @@ typedef struct w_node{
     int ch_count;
 }w_node;
 
-vector <string> exec_list;
-vector <w_node> p_list;
+vector <w_node> npipe_list;
 //vector <string> cmds;
+vector <pid_t> pid_list;
 const string builtin_list[3] = {"setenv", "printenv", "exit"};
 
 token_list *cmds;
 int p1_fd[2], p2_fd[2], mode, count;
 
 void update_plist(){
-    vector <w_node>::iterator it = p_list.begin();
-    for(;it!=p_list.end(); it++)
+    vector <w_node>::iterator it = npipe_list.begin();
+    for(;it!=npipe_list.end(); it++)
         it->remain--;
 }
 
 int search_plist(int n){
-    for(int i=0;i < p_list.size(); i++)
-        if(p_list[i].remain == n)
+    for(int i=0;i < npipe_list.size(); i++)
+        if(npipe_list[i].remain == n)
             return i;
     return -1;
 }
 void insert_plist(int n, int *f, int c){
     w_node tmp = {n, f[0], f[1], c};
-    p_list.push_back(tmp);
+    npipe_list.push_back(tmp);
 }
 
 void split(string s, char delim, token_list *l){
@@ -74,29 +74,6 @@ void split(string s, char delim, token_list *l){
     l->length = n;
 }
 
-void update_execlist(string _path){
-    token_list paths;
-    split(_path, ':', &paths);
-    DIR *dir;
-    struct dirent *ent;
-    struct stat buf;
-    char cwd[PATH_MAX];
-
-    getcwd(cwd, sizeof(cwd));
-    exec_list.clear();
-    for(int i=0; i<paths.length; i++){
-        if((dir = opendir(paths.tok[i].c_str())) != NULL){
-            chdir(paths.tok[i].c_str());
-            while((ent = readdir(dir)) != NULL){
-                stat(ent->d_name, &buf);
-                if(buf.st_mode & S_IXUSR && !S_ISDIR(buf.st_mode))
-                    exec_list.push_back(ent->d_name);
-            }
-        }
-        closedir(dir);
-    }   
-    chdir(cwd);
-}
 
 bool handle_builtin(string input){
     int i=0;
@@ -107,7 +84,6 @@ bool handle_builtin(string input){
     case 0:
         split(input, ' ', &params);
         setenv(params.tok[1].c_str(), params.tok[2].c_str(), 1);
-        update_execlist(params.tok[2]);
         break;
     case 1:
         split(input, ' ', &params);
@@ -125,7 +101,7 @@ bool handle_builtin(string input){
 inline bool is_numpipe(string cmd, size_t *pos){
     //pos : index of last '|' 
     for (int i=0; i<cmd.length(); i++)
-        if(!isdigit(cmd[i]) && cmd[i] != ' ')
+        if(!isdigit(cmd[i]) && cmd[i] != ' ' && cmd[i] != '+')
             return false;
     return true;
 }
@@ -159,7 +135,6 @@ int parse_cmd(string input){
         unsplit_cmds.tok[n-1].erase(pos, 1);
     if(( errpipe = is_errpipe(unsplit_cmds.tok[n-1], &pos) ))
         unsplit_cmds.tok[n-1].erase(pos, 1);
-
     if(( npipe = is_numpipe(unsplit_cmds.tok[n-1], &pos) ))
         n -= 1;
     count = n;
@@ -183,13 +158,6 @@ int parse_cmd(string input){
         return OUTFILE;
     }
     else return NORMAL;
-}
-
-inline bool is_vaild(string c){
-    for(int i = 0; i<exec_list.size(); i++)
-        if(c == exec_list[i])
-            return true;
-    return false;
 }
 
 const char **tkltocstr(token_list c){
@@ -220,126 +188,104 @@ void run(token_list cmd, int fd_in, int out, int err){
         close(out);
     }
     
-    if(is_vaild(cmd.tok[0])){
-        const char **argv = tkltocstr(cmd);
-        execvp(argv[0], (char**)argv);
-        delete [] argv;
-        exit(errno);
+    const char **argv = tkltocstr(cmd);
+    execvp(argv[0], (char**)argv);
+    if(errno == ENOENT)
+        cerr << "Unknown command: [%s" << cmd.tok[0].c_str() << "].\n";
+    exit(0);
+}
+int numpipe_parse(){
+    int sum = 0;
+    size_t pos1 = -1;
+    size_t pos2;
+    string exp = cmds[count-1].tok[cmds[count-1].length];
+    while((pos2 = exp.find('+', pos1+1)) != string::npos){
+        sum += stoi(exp.substr(pos1+1, pos2 - pos1 - 1));
+        pos1 = pos2;
     }
-    else{
-        fprintf(stderr,"Unknown command: [%s].\n", cmd.tok[0].c_str());
-        exit(0);
-    }
+    sum += stoi(exp.substr(pos2+1, string::npos));
+    return sum;
 }
 
-void last_cmdcntl(bool fst, pid_t lpid, int fd_in = STDIN_FILENO){
-    int n, index, inpipe_WRITE, out = STDOUT_FILENO, err = STDERR_FILENO, fd[2];
-    int *last = fd, wait_count;
+void last_cmdcntl(int IN = STDIN_FILENO){
+    int OUT = STDOUT_FILENO, ERR = STDERR_FILENO, fd[2];
+    int index, n;
+    int *last = fd;
     pid_t cur_pid;
-    bool receive = false, ign = false, merge = false;
 
-    if(fst)
-        if((index = search_plist(0)) != -1){
-            wait_count = p_list.at(index).ch_count;
-            fd_in = p_list.at(index).fd[READ];
-            close(p_list.at(index).fd[WRITE]);
-            p_list.erase(p_list.begin()+index);
-            receive = true;
-        }
     if(mode == ERRPIPE || mode == NUMPIPE){
-        n = stoi(cmds[count-1].tok[cmds[count-1].length]);
+        n = numpipe_parse();
+        //n = stoi(cmds[count-1].tok[cmds[count-1].length]);
         index = search_plist(n);
-        if(index != -1){
-            last = p_list.at(index).fd;
-            p_list.at(index).ch_count++;
-        }
+        if(index != -1)
+            last = npipe_list.at(index).fd;
         else{
             pipe(last);
             insert_plist(n, last, 1);
         }
+        OUT = last[WRITE];
+        if(mode == ERRPIPE) ERR = OUT;
     }
-
+    while((cur_pid = fork()) < 0){
+        waitpid(-1, NULL, 0);
+        cout << "too much process, wait success\n";
+    }
     if((cur_pid = fork()) == 0){
         if(mode == OUTFILE){
             const char * fd_name = cmds[count-1].tok[cmds[count-1].length].c_str();
-            out = open(fd_name, O_WRONLY | O_CREAT, 0666);
-            ftruncate(out, 0); 
-            lseek(out, 0, SEEK_SET); 
+            OUT = open(fd_name, O_WRONLY | O_CREAT, 0666);
+            ftruncate(OUT, 0); 
+            lseek(OUT, 0, SEEK_SET); 
         }
-        else if(mode == ERRPIPE || mode == NUMPIPE) {
-            //if(receive) close(inpipe_WRITE);
+        else if(mode == ERRPIPE || mode == NUMPIPE) 
             close(last[READ]);
-            out = last[WRITE];
-            if(mode == ERRPIPE) err = out;
-        }
-        run(cmds[count-1], fd_in, out, err);
+        run(cmds[count-1], IN, OUT, ERR);
     }
     else{
-        int p;
-        if(fd_in != STDIN_FILENO) close(fd_in);
-        //if(mode == ERRPIPE || mode == NUMPIPE) close(last[WRITE]);  
-        if(!fst) waitpid(lpid, NULL, 0);
-        else if(receive){
-            //close(inpipe_WRITE);
-            for (int i = 0; i < wait_count;){
-                
-                if((p = wait(NULL)) != cur_pid) i++;
-                else ign =true;
-            }
-        }
-        if(mode != ERRPIPE && mode != NUMPIPE && !ign) waitpid(cur_pid, NULL, 0);
+        if(mode != ERRPIPE && mode != NUMPIPE) pid_list.push_back(cur_pid);  
+        if(IN != STDIN_FILENO) close(IN);
+
+        vector <pid_t> :: iterator it = pid_list.begin();
+        for(; it!=pid_list.end(); it++)
+            waitpid(*it, NULL, 0);
     }
 }
 
-void pipe_control(){
+void pipe_control(int IN){
     pid_t pid1, pid2;
     int *front_pipe = p1_fd, *end_pipe = p2_fd;
-    int fd_in = STDIN_FILENO, inpipe_WRITE, index, i, n, wait_count;
-    bool PIPEIN = false, ign = false;
     pipe(front_pipe);
     
-    if((index = search_plist(0)) != -1){
-        fd_in = p_list.at(index).fd[READ];
-        wait_count = p_list.at(index).ch_count;
-        close(p_list.at(index).fd[WRITE]);
-        p_list.erase(p_list.begin()+index);
-    }
     if((pid1 = fork()) == 0){
         close(front_pipe[READ]);
-        run(cmds[0], fd_in, front_pipe[WRITE], STDERR_FILENO);
+        run(cmds[0], IN, front_pipe[WRITE], STDERR_FILENO);
     }
-    //parent wait all previous round hang childs
     else{
+        pid_list.push_back(pid1);
         close(front_pipe[WRITE]);
-        if(fd_in != STDIN_FILENO){
-            close(fd_in);
-            //close(inpipe_WRITE);
-            for (int i = 0; i < wait_count;){
-                int p;
-                if((p = wait(NULL)) != pid1 )i++;
-                else ign = true;
-            }
-        }
+        if(IN != STDIN_FILENO) close(IN);
     }
 
     for(int i = 1;i < count-1; i++){
         //Pid1 --pipe1--> Pid2 --pipe2-->
         pipe(end_pipe);
-        if((pid2 = fork()) == 0){
+        while((pid2 = fork()) < 0){
+            waitpid(-1, NULL, 0);
+            cout << "too many processes, wait success\n";
+        }
+        if(pid2 == 0){
             close(end_pipe[READ]);
             run(cmds[i], front_pipe[READ], end_pipe[WRITE], STDERR_FILENO);
         }
         else{
+            pid_list.push_back(pid2);
             close(front_pipe[READ]);
             close(end_pipe[WRITE]);
-            if(!ign) waitpid(pid1, NULL, 0);
             swap(front_pipe, end_pipe);
             swap(pid1, pid2);
-            pipe(end_pipe);
         }
     }
-    //if need to pipe stdout or stderr to next "n" line
-    last_cmdcntl(false, pid1, front_pipe[READ]);
+    last_cmdcntl(front_pipe[READ]);
 }
 
 void init(){
@@ -353,23 +299,27 @@ void init(){
 
 int main(int argc, char* const argv[]){
     string input_string;
-    const char prompt[] = "% ";
-    int i, IN = STDIN_FILENO, OUT = STDOUT_FILENO;
+    int IN = STDIN_FILENO, OUT = STDOUT_FILENO;
+    int npipe_idx;
     
     setenv("PATH", "bin:.", 1);
-    update_execlist(getenv("PATH"));
-
     while(true){
-        cout<<prompt<<flush;
+        cout<<"% "<<flush;
         getline(cin, input_string);
         if(handle_builtin(input_string))
             continue;
         mode = parse_cmd(input_string);
 
+        if((npipe_idx = search_plist(0)) != -1){
+            IN = npipe_list.at(npipe_idx).fd[READ];
+            close(npipe_list.at(npipe_idx).fd[WRITE]);
+            npipe_list.erase(npipe_list.begin()+npipe_idx);
+        }
+
         if(count == 1)
-            last_cmdcntl(true, -1);
+            last_cmdcntl(IN);
         else{
-            pipe_control();
+            pipe_control(IN);
         }
         init();
     }
